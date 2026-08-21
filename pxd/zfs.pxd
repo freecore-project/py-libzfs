@@ -15,7 +15,7 @@ cdef extern from "sys/param.h":
 
 cdef extern from "sys/mount.h":
     enum:
-        MS_FORCE
+        MNT_FORCE
 
 
 cdef extern from "sys/fs/zfs.h" nogil:
@@ -543,23 +543,40 @@ cdef extern from "sys/fs/zfs.h" nogil:
         uint64_t    pres_reflowed # bytes moved so far
         uint64_t    pres_waiting_for_resilver
 
-    ctypedef struct pool_scan_stat_t:
-        uint64_t    pss_func # pool_scan_func_t
-        uint64_t    pss_state # dsl_scan_state_t
-        uint64_t    pss_start_time # scan start time
-        uint64_t    pss_end_time # scan end time
-        uint64_t    pss_to_examine # total bytes to scan
-        uint64_t    pss_examined # total bytes located by scanner
-        uint64_t    pss_skipped # total bytes skipped by scanner
-        uint64_t    pss_to_process # total bytes to process
-        uint64_t    pss_processed # total processed bytes
-        uint64_t    pss_errors # scan errors
-        uint64_t    pss_pass_exam # examined bytes per scan pass
-        uint64_t    pss_pass_start # start time of a scan pass
-        uint64_t    pss_pass_scrub_pause # pause time of a scrub pass
-        uint64_t    pss_pass_scrub_spent_paused
-        uint64_t    pss_pass_issued # issued bytes per scan pass
-        uint64_t    pss_issued # total bytes checked by scanner
+    IF HAVE_POOL_SCAN_STAT_PSS_SKIPPED:
+        ctypedef struct pool_scan_stat_t:
+            uint64_t    pss_func # pool_scan_func_t
+            uint64_t    pss_state # dsl_scan_state_t
+            uint64_t    pss_start_time # scan start time
+            uint64_t    pss_end_time # scan end time
+            uint64_t    pss_to_examine # total bytes to scan
+            uint64_t    pss_examined # total bytes located by scanner
+            uint64_t    pss_skipped # total bytes skipped by scanner
+            uint64_t    pss_processed # total processed bytes
+            uint64_t    pss_errors # scan errors
+            uint64_t    pss_pass_exam # examined bytes per scan pass
+            uint64_t    pss_pass_start # start time of a scan pass
+            uint64_t    pss_pass_scrub_pause # pause time of a scrub pass
+            uint64_t    pss_pass_scrub_spent_paused
+            uint64_t    pss_pass_issued # issued bytes per scan pass
+            uint64_t    pss_issued # total bytes checked by scanner
+    ELSE:
+        ctypedef struct pool_scan_stat_t:
+            uint64_t    pss_func # pool_scan_func_t
+            uint64_t    pss_state # dsl_scan_state_t
+            uint64_t    pss_start_time # scan start time
+            uint64_t    pss_end_time # scan end time
+            uint64_t    pss_to_examine # total bytes to scan
+            uint64_t    pss_examined # total bytes located by scanner
+            uint64_t    pss_to_process # total bytes to process
+            uint64_t    pss_processed # total processed bytes
+            uint64_t    pss_errors # scan errors
+            uint64_t    pss_pass_exam # examined bytes per scan pass
+            uint64_t    pss_pass_start # start time of a scan pass
+            uint64_t    pss_pass_scrub_pause # pause time of a scrub pass
+            uint64_t    pss_pass_scrub_spent_paused
+            uint64_t    pss_pass_issued # issued bytes per scan pass
+            uint64_t    pss_issued # total bytes checked by scanner
 
     ctypedef struct ddt_object_t:
         uint64_t	ddo_count
@@ -593,6 +610,7 @@ cdef extern from "zfeature_common.h":
         ZFEATURE_FLAG_MOS
         ZFEATURE_FLAG_ACTIVATE_ON_ENABLE
         ZFEATURE_FLAG_PER_DATASET
+        ZFEATURE_FLAG_NO_UPGRADE
 
     ctypedef struct zfeature_info_t:
         spa_feature_t fi_feature
@@ -600,6 +618,7 @@ cdef extern from "zfeature_common.h":
         const char* fi_guid
         const char* fi_desc
         zfeature_flags_t fi_flags
+        boolean_t fi_zfs_mod_supported
         const spa_feature_t* fi_depends
 
     cdef zfeature_info_t* spa_feature_table

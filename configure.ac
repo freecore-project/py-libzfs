@@ -60,6 +60,8 @@ AC_ARG_VAR(freebsd_src, AS_HELP_STRING([Provide path for freebsd source tree. Th
 if [[ "$prefix" = "NONE" ]]; then
 	if [[ "$build_macos" = "yes" ]]; then
 		header_prefix=/usr/local/zfs
+	elif [[ -f "/usr/include/libzfs/libzfs.h" ]]; then
+		header_prefix=/usr
 	else
 		header_prefix=/usr/local
 	fi
@@ -242,6 +244,17 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM(
 	[AC_SUBST(HAVE_ZPOOL_LOAD_POLICY_T, 0) AC_MSG_NOTICE([NOT FOUND])]
 )
 
+AC_MSG_NOTICE([Checking existence of pool_raidz_expand_stat_t])
+
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <sys/fs/zfs.h>],
+		[
+			pool_raidz_expand_stat_t *f = NULL;
+		]
+	)],
+	[AC_SUBST(HAVE_POOL_RAIDZ_EXPAND_STAT_T, 1) AC_MSG_NOTICE([OK])],
+	[AC_SUBST(HAVE_POOL_RAIDZ_EXPAND_STAT_T, 0) AC_MSG_NOTICE([Not found])]
+)
 
 
 
@@ -265,7 +278,11 @@ dnl Let's default HAVE_ZPOOL_READ_LABEL_PARAMS value to 0
 
 AC_SUBST(HAVE_ZPOOL_READ_LABEL_PARAMS, 0)
 
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
+dnl AC_COMPILE_IFELSE: arg-count detection must be header-driven.
+dnl AC_LINK_IFELSE falls through to the fallback when -lzfs can't be located
+dnl at configure time (FB15 poudriere jail before libzfs.so is staged), which
+dnl leaves HAVE_ZPOOL_READ_LABEL_PARAMS=0 and triggers "too few arguments" at cc.
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 		[#include <libzutil.h>],
 		[
 			zpool_read_label(0, NULL, NULL) /* ; */
@@ -282,14 +299,15 @@ AC_MSG_NOTICE([Checking existence of zpool_search_import in libzutil.h header])
 
 AC_SUBST(HAVE_ZPOOL_SEARCH_IMPORT_PARAMS, 0)
 
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
+dnl AC_COMPILE_IFELSE: same rationale as zpool_read_label above.
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 		[#include <libzutil.h>],
 		[
 			zpool_search_import(NULL, NULL, NULL);
 		]
 	)],
 	[AC_SUBST(HAVE_ZPOOL_SEARCH_IMPORT_LIBZUTIL, 1) AC_SUBST(HAVE_ZPOOL_SEARCH_IMPORT_PARAMS, 3) AC_MSG_NOTICE(OK)],
-	[AC_LINK_IFELSE([AC_LANG_PROGRAM(
+	[AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 		[#include <libzutil.h>],
 		[
 			zpool_search_import(NULL, NULL);
@@ -323,7 +341,13 @@ dnl Checking for parameters of zpool_vdev_attach
 
 AC_MSG_NOTICE([Checking zpool_vdev_attach parameters])
 
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
+dnl Use AC_COMPILE_IFELSE so arg-count detection is driven by the header
+dnl alone; AC_LINK_IFELSE can silently fall through to the old arg count if
+dnl -lzfs is not locatable at configure time (e.g. FB15 poudriere build jail
+dnl before libzfs.so is staged), producing FB13-era HAVE_* values and
+dnl triggering "too few arguments" errors at cc time.
+
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 		[#include <libzfs.h>],
 		[
 			zpool_vdev_attach(NULL, NULL, NULL, NULL, 0, 0);
@@ -348,12 +372,39 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM(
 	[AC_SUBST(HAVE_ZFS_FOREACH_MOUNTPOINT, 0) AC_MSG_NOTICE(NOT FOUND)]
 )
 
+dnl Checking for existence of zpool_ddt_prune function
+
+AC_MSG_NOTICE([Checking for existence of zpool_ddt_prune])
+
+AC_LINK_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			zpool_ddt_prune(NULL, 0, 0);
+		],
+	)],
+	[AC_SUBST(HAVE_ZPOOL_DDT_PRUNE, 1) AC_MSG_NOTICE(OK)],
+	[AC_SUBST(HAVE_ZPOOL_DDT_PRUNE, 0) AC_MSG_NOTICE(NOT FOUND)]
+)
+
+dnl Checking for existence of zpool_prefetch function
+
+AC_MSG_NOTICE([Checking for existence of zpool_prefetch])
+
+AC_LINK_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			zpool_prefetch(NULL, 0);
+		],
+	)],
+	[AC_SUBST(HAVE_ZPOOL_PREFETCH, 1) AC_MSG_NOTICE(OK)],
+	[AC_SUBST(HAVE_ZPOOL_PREFETCH, 0) AC_MSG_NOTICE(NOT FOUND)]
+)
 
 dnl Checking parameters of zvol_volsize_to_reservation function
 
 AC_MSG_NOTICE([Checking function signature zvol_volsize_to_reservation])
 
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 		[#include <libzfs.h>],
 		[
 			zvol_volsize_to_reservation(NULL, 0, NULL) /* ; */
@@ -364,11 +415,43 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM(
 )
 
 
+dnl Checking parameters of zpool_add function
+
+AC_MSG_NOTICE([Checking function signature zpool_add])
+
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			zpool_add(NULL, NULL, 0) /* ; */
+		]
+	)],
+	[AC_SUBST(HAVE_ZPOOL_ADD, 3) AC_MSG_NOTICE([3 PARAMS])],
+	[AC_SUBST(HAVE_ZPOOL_ADD, 2) AC_MSG_NOTICE([2 PARAMS])]
+)
+
+
+dnl Checking parameters of zpool_enable_datasets function
+dnl OpenZFS 2.4 (FB15) added a uint_t mntopts flags argument.
+
+AC_MSG_NOTICE([Checking function signature zpool_enable_datasets])
+
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			zpool_enable_datasets(NULL, NULL, 0, 0) /* ; */
+		]
+	)],
+	[AC_SUBST(HAVE_ZPOOL_ENABLE_DATASETS, 4) AC_MSG_NOTICE([4 PARAMS])],
+	[AC_SUBST(HAVE_ZPOOL_ENABLE_DATASETS, 3) AC_MSG_NOTICE([3 PARAMS])]
+)
+
+
 dnl Checking function zpool_search_import existence
 
 AC_MSG_NOTICE([Checking existence of zpool_search_import in libzfs.h header])
 
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
+dnl AC_COMPILE_IFELSE: arg-count detection must be header-driven (see libzutil.h check above).
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 		[#include <libzfs.h>],
 		[
 			zpool_search_import(NULL, NULL);
@@ -398,7 +481,8 @@ dnl Checking function zpool_read_label existence
 
 AC_MSG_NOTICE([Checking existence of zpool_read_label with 2 params in libzfs.h header])
 
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
+dnl AC_COMPILE_IFELSE: arg-count detection must be header-driven (see libzutil.h check above).
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 		[#include <libzfs.h>],
 		[
 			zpool_read_label(0, NULL) /* ; */
@@ -411,7 +495,7 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM(
 
 AC_MSG_NOTICE([Checking existence of zpool_read_label with 3 params in libzfs.h header])
 
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 		[#include <libzfs.h>],
 		[
 			zpool_read_label(0, NULL, NULL) /* ; */
@@ -455,7 +539,7 @@ dnl Checking function signature of zpool_get_status
 
 AC_MSG_NOTICE([Checking function signature of zpool_get_status])
 
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 		[#include <libzfs.h>],
 		[
 			zpool_get_status(NULL, NULL, NULL) /* ; */
@@ -613,6 +697,21 @@ else
 	)
 fi
 
+dnl Checking function signature of zfs_userspace_cb_t
+# This function type gained a fifth argument in FreeBSD 15
+
+AC_MSG_NOTICE([Checking function signature of zfs_userspace_cb_t])
+
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+		 int f(void *, const char *, uid_t, uint64_t, uint64_t);
+		 zfs_userspace_cb_t g = f;
+		]
+	)],
+	[AC_SUBST(HAVE_ZFS_USERSPACE_CB_T, 5) AC_MSG_NOTICE([5 params])],
+	[AC_SUBST(HAVE_ZFS_USERSPACE_CB_T, 4) AC_MSG_NOTICE([4 params])]
+)
 
 dnl Checking existence of an enum value
 
@@ -626,6 +725,94 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 	)],
 	[AC_SUBST(HAVE_EZFS_SCRUB_PAUSED, 1) AC_MSG_NOTICE([OK])],
 	[AC_SUBST(HAVE_EZFS_SCRUB_PAUSED, 0) AC_MSG_NOTICE([NOT FOUND])]
+)
+
+dnl Checking existence of an enum value
+
+# NB: the ERRORSCRUBBING, ERRORSCRUB_PAUSED, and SCRUB_PAUSED_TO_CANCEL symbols
+# were all added to OpenZFS by a single commit.
+AC_MSG_NOTICE([Checking EZFS_ERRORSCRUBBING presence])
+
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			EZFS_ERRORSCRUBBING == EZFS_ERRORSCRUBBING /* ; */
+		]
+	)],
+	[AC_SUBST(HAVE_EZFS_ERRORSCRUBBING, 1) AC_MSG_NOTICE([OK])],
+	[AC_SUBST(HAVE_EZFS_ERRORSCRUBBING, 0) AC_MSG_NOTICE([NOT FOUND])]
+)
+
+dnl Checking existence of an enum value
+AC_MSG_NOTICE([Checking EZFS_VDEV_NOTSUP presence])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			EZFS_VDEV_NOTSUP == EZFS_VDEV_NOTSUP /* ; */
+		]
+	)],
+	[AC_SUBST(HAVE_EZFS_VDEV_NOTSUP, 1) AC_MSG_NOTICE([OK])],
+	[AC_SUBST(HAVE_EZFS_VDEV_NOTSUP, 0) AC_MSG_NOTICE([NOT FOUND])]
+)
+
+dnl Checking existence of an enum value
+AC_MSG_NOTICE([Checking EZFS_NOT_USER_NAMESPACE presence])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			EZFS_NOT_USER_NAMESPACE == EZFS_NOT_USER_NAMESPACE /* ; */
+		]
+	)],
+	[AC_SUBST(HAVE_EZFS_NOT_USER_NAMESPACE, 1) AC_MSG_NOTICE([OK])],
+	[AC_SUBST(HAVE_EZFS_NOT_USER_NAMESPACE, 0) AC_MSG_NOTICE([NOT FOUND])]
+)
+
+dnl Checking existence of an enum value
+AC_MSG_NOTICE([Checking EZFS_RESUME_EXISTS presence])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			EZFS_RESUME_EXISTS == EZFS_RESUME_EXISTS /* ; */
+		]
+	)],
+	[AC_SUBST(HAVE_EZFS_RESUME_EXISTS, 1) AC_MSG_NOTICE([OK])],
+	[AC_SUBST(HAVE_EZFS_RESUME_EXISTS, 0) AC_MSG_NOTICE([NOT FOUND])]
+)
+
+dnl Checking existence of an enum value
+AC_MSG_NOTICE([Checking EZFS_SHAREFAILED presence])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			EZFS_SHAREFAILED == EZFS_SHAREFAILED /* ; */
+		]
+	)],
+	[AC_SUBST(HAVE_EZFS_SHAREFAILED, 1) AC_MSG_NOTICE([OK])],
+	[AC_SUBST(HAVE_EZFS_SHAREFAILED, 0) AC_MSG_NOTICE([NOT FOUND])]
+)
+
+dnl Checking existence of an enum value
+AC_MSG_NOTICE([Checking EZFS_RAIDZ_EXPAND_IN_PROGRESS presence])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			EZFS_RAIDZ_EXPAND_IN_PROGRESS == EZFS_RAIDZ_EXPAND_IN_PROGRESS /* ; */
+		]
+	)],
+	[AC_SUBST(HAVE_EZFS_RAIDZ_EXPAND_IN_PROGRESS, 1) AC_MSG_NOTICE([OK])],
+	[AC_SUBST(HAVE_EZFS_RAIDZ_EXPAND_IN_PROGRESS, 0) AC_MSG_NOTICE([NOT FOUND])]
+)
+
+dnl Checking existence of an enum value
+AC_MSG_NOTICE([Checking EZFS_ASHIFT_MISMATCH presence])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			EZFS_ASHIFT_MISMATCH == EZFS_ASHIFT_MISMATCH /* ; */
+		]
+	)],
+	[AC_SUBST(HAVE_EZFS_ASHIFT_MISMATCH, 1) AC_MSG_NOTICE([OK])],
+	[AC_SUBST(HAVE_EZFS_ASHIFT_MISMATCH, 0) AC_MSG_NOTICE([NOT FOUND])]
 )
 
 
@@ -861,6 +1048,22 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 	[AC_SUBST(HAVE_RECVFLAGS_T_RESUMABLE, 0) AC_MSG_NOTICE([NOT FOUND])]
 )
 
+dnl Checking for pss_skipped in struct pool_scan_stat
+
+AC_MSG_NOTICE([Checking for pss_skipped member in pool_scan_stat struct])
+
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+		[#include <libzfs.h>],
+		[
+			pool_scan_stat t;
+			t.pss_skipped = 1 /* ; */
+		]
+	)],
+	[AC_SUBST(HAVE_POOL_SCAN_STAT_PSS_SKIPPED, 1) AC_MSG_NOTICE([OK])],
+	[AC_SUBST(HAVE_POOL_SCAN_STAT_PSS_SKIPPED, 0) AC_MSG_NOTICE([NOT FOUND])]
+)
+
+
 
 dnl Checking typedef sendflags_t in zfs header
 
@@ -1064,11 +1267,17 @@ AC_CHECK_HEADERS([libzfs_core.h], [], [AC_MSG_ERROR(A working libzfs_core header
 
 
 dnl Checking lzc_bookmark existence
+dnl AC_COMPILE_IFELSE: existence/arg-count detection must be header-driven.
+dnl AC_LINK_IFELSE silently falls through when libzfs_core.so isn't staged
+dnl at configure time (poudriere), producing HAVE_LZC_BOOKMARK=0 and
+dnl HAVE_LZC_SEND_SPACE=0 against an FB15 4-arg header, and Cython then
+dnl emits a 3-arg call that fails cc with "too few arguments, expected 4,
+dnl have 3" (same root cause as the #4/#5/#6 AC_LINK->AC_COMPILE fixes).
 
 AC_MSG_NOTICE([Verifying lzc_bookmark existence])
 
 exists=0
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 		[#include <libzfs_core.h>],
 		[
 			lzc_bookmark(NULL, NULL) /* ; */
@@ -1088,7 +1297,7 @@ then
 	AC_MSG_NOTICE([Verifying existence and params of lzc_send_space])
 
 	exists=0
-	AC_LINK_IFELSE([AC_LANG_PROGRAM(
+	AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 			[#include <libzfs_core.h>],
 			[
 				lzc_send_space(NULL, NULL, LZC_SEND_FLAG_EMBED_DATA, NULL) /* ; */

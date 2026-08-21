@@ -13,7 +13,7 @@ import threading
 cimport libzfs
 cimport zfs
 cimport nvpair
-from datetime import datetime
+from datetime import datetime, timezone
 from libc.errno cimport errno
 from libc.string cimport memset, strncpy
 from libc.stdlib cimport realloc
@@ -53,6 +53,40 @@ class UserquotaProp(enum.IntEnum):
         PROJECTOBJUSED = zfs.ZFS_PROP_PROJECTOBJUSED
         PROJECTOBJQUOTA = zfs.ZFS_PROP_PROJECTOBJQUOTA
 
+
+IF HAVE_EZFS_SCRUB_PAUSED == 1:
+    class Error(enum.IntEnum):
+        SCRUB_PAUSED = libzfs.EZFS_SCRUB_PAUSED
+
+IF HAVE_EZFS_ERRORSCRUBBING == 1:
+    class Error(enum.IntEnum):
+        ERRORSCRUBBING = libzfs.EZFS_ERRORSCRUBBING
+        ERRORSCRUB_PAUSED = libzfs.EZFS_ERRORSCRUB_PAUSED
+        SCRUB_PAUSED_TO_CANCEL = libzfs.EZFS_SCRUB_PAUSED_TO_CANCEL
+
+IF HAVE_EZFS_VDEV_NOTSUP == 1:
+    class Error(enum.IntEnum):
+        VDEVNOTSUP = libzfs.EZFS_VDEV_NOTSUP
+
+IF HAVE_EZFS_NOT_USER_NAMESPACE == 1:
+    class Error(enum.IntEnum):
+        NOT_USER_NAMESPACE = libzfs.EZFS_NOT_USER_NAMESPACE
+
+IF HAVE_EZFS_RESUME_EXISTS == 1:
+    class Error(enum.IntEnum):
+        RESUME_EXISTS = libzfs.EZFS_RESUME_EXISTS
+
+IF HAVE_EZFS_SHAREFAILED == 1:
+    class Error(enum.IntEnum):
+        SHAREFAILED = libzfs.EZFS_SHAREFAILED
+
+IF HAVE_EZFS_RAIDZ_EXPAND_IN_PROGRESS == 1:
+    class Error(enum.IntEnum):
+        RAIDZ_EXPAND_IN_PROGRESS = libzfs.EZFS_RAIDZ_EXPAND_IN_PROGRESS
+
+IF HAVE_EZFS_ASHIFT_MISMATCH == 1:    
+    class Error(enum.IntEnum):
+        ASHIFT_MISMATCH = libzfs.EZFS_ASHIFT_MISMATCH
 
 class Error(enum.IntEnum):
     SUCCESS = libzfs.EZFS_SUCCESS
@@ -122,14 +156,10 @@ class Error(enum.IntEnum):
     THREADCREATEFAILED = libzfs.EZFS_THREADCREATEFAILED
     ONLINE = libzfs.EZFS_POSTSPLIT_ONLINE
     SCRUBBING = libzfs.EZFS_SCRUBBING
-    ERRORSCRUBBING = libzfs.EZFS_ERRORSCRUBBING
-    ERRORSCRUB_PAUSED = libzfs.EZFS_ERRORSCRUB_PAUSED
     SCRUB = libzfs.EZFS_NO_SCRUB
     DIFF = libzfs.EZFS_DIFF
     DIFFDATA = libzfs.EZFS_DIFFDATA
     POOLREADONLY = libzfs.EZFS_POOLREADONLY
-    SCRUB_PAUSED = libzfs.EZFS_SCRUB_PAUSED
-    SCRUB_PAUSED_TO_CANCEL = libzfs.EZFS_SCRUB_PAUSED_TO_CANCEL
     ACTIVE_POOL = libzfs.EZFS_ACTIVE_POOL
     CRYPTO_FAILED = libzfs.EZFS_CRYPTOFAILED
     NO_PENDING = libzfs.EZFS_NO_PENDING
@@ -149,13 +179,7 @@ class Error(enum.IntEnum):
     NO_RESILVER_DEFER = libzfs.EZFS_NO_RESILVER_DEFER
     EXPORT_IN_PROGRESS = libzfs.EZFS_EXPORT_IN_PROGRESS
     REBUILDING = libzfs.EZFS_REBUILDING
-    VDEV_NOTSUP = libzfs.EZFS_VDEV_NOTSUP
-    NOT_USER_NAMESPACE = libzfs.EZFS_NOT_USER_NAMESPACE
     CKSUM = libzfs.EZFS_CKSUM
-    RESUME_EXISTS = libzfs.EZFS_RESUME_EXISTS
-    SHAREFAILED = libzfs.EZFS_SHAREFAILED
-    RAIDZ_EXPAND_IN_PROGRESS = libzfs.EZFS_RAIDZ_EXPAND_IN_PROGRESS
-    ASHIFT_MISMATCH = libzfs.EZFS_ASHIFT_MISMATCH
     UNKNOWN = libzfs.EZFS_UNKNOWN
 
 
@@ -455,7 +479,7 @@ class DiffRecord(object):
         timestamp, cmd, typ, rest = raw.split(maxsplit=3)
         paths = rest.split('->', maxsplit=2)
         self.raw = raw
-        self.timestamp = datetime.utcfromtimestamp(float(timestamp))
+        self.timestamp = datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
         self.cmd = DiffRecordType(cmd)
         self.type = DiffFileType(typ)
         self.path = paths[0].strip()
@@ -1450,7 +1474,10 @@ cdef class ZFS(object):
             self.zpool_enable_datasets(newname, enable_shares)
         ELSE:
             with nogil:
-                ret = libzfs.zpool_enable_datasets(newpool.handle, NULL, 0)
+                IF HAVE_ZPOOL_ENABLE_DATASETS == 4:
+                    ret = libzfs.zpool_enable_datasets(newpool.handle, NULL, 0, 0)
+                ELSE:
+                    ret = libzfs.zpool_enable_datasets(newpool.handle, NULL, 0)
 
         self.write_history(
             'zpool import', str(pool.guid), '-l' if load_keys else '', newpool.name
@@ -1931,7 +1958,8 @@ cdef class ZPoolFeature(object):
             'name': self.name,
             'guid': self.guid,
             'description': self.description,
-            'state': self.state.name
+            'state': self.state.name,
+            'supports_upgrade': self.supports_upgrade,
         }
 
     property name:
@@ -1945,6 +1973,13 @@ cdef class ZPoolFeature(object):
     property description:
         def __get__(self):
             return self.feature.fi_desc
+
+    property supports_upgrade:
+        def __get__(self):
+            return (
+                self.feature.fi_zfs_mod_supported and
+                not (self.feature.fi_flags & zfs.ZFEATURE_FLAG_NO_UPGRADE)
+            )
 
     property state:
         def __get__(self):
@@ -2590,100 +2625,104 @@ cdef class ZFSVdev(object):
                 return result
 
 
-cdef class ZPoolRaidzExpand(object):
-    cdef readonly ZFS root
-    cdef readonly ZFSPool pool
-    cdef zfs.pool_raidz_expand_stat_t *stats
+IF HAVE_POOL_RAIDZ_EXPAND_STAT_T == 1:
+    cdef class ZPoolRaidzExpand(object):
+        cdef readonly ZFS root
+        cdef readonly ZFSPool pool
+        cdef zfs.pool_raidz_expand_stat_t *stats
 
-    def __init__(self, ZFS root, ZFSPool pool):
-        self.root = root
-        self.pool = pool
-        self.stats = NULL
-        cdef NVList config
-        cdef NVList nvroot = pool.get_raw_config().get_raw(zfs.ZPOOL_CONFIG_VDEV_TREE)
-        cdef int ret
-        cdef uint_t total
-        if zfs.ZPOOL_CONFIG_SCAN_STATS not in nvroot:
-            return
-
-        ret = nvroot.nvlist_lookup_uint64_array(
-            <nvpair.nvlist_t*>nvroot.handle, zfs.ZPOOL_CONFIG_RAIDZ_EXPAND_STATS, <uint64_t **>&self.stats, &total
-        )
-        if ret != 0:
-            raise ZFSPoolRaidzExpandStatsException(ret)
-
-    property state:
-        def __get__(self):
-            if self.stats != NULL:
-                return ScanState(self.stats.pres_state)
-
-    property expanding_vdev:
-        def __get__(self):
-            if self.stats != NULL:
-                return self.stats.pres_expanding_vdev
-
-    property start_time:
-        def __get__(self):
-            if self.stats != NULL:
-                return datetime.utcfromtimestamp(self.stats.pres_start_time)
-
-    property end_time:
-        def __get__(self):
-            if self.stats != NULL and self.state != ScanState.SCANNING:
-                return datetime.utcfromtimestamp(self.stats.pres_end_time)
-
-    property bytes_to_reflow:
-        def __get__(self):
-            if self.stats != NULL:
-                return self.stats.pres_to_reflow
-
-    property bytes_reflowed:
-        def __get__(self):
-            if self.stats != NULL:
-                return self.stats.pres_reflowed
-
-    property waiting_for_resilver:
-        def __get__(self):
-            if self.stats != NULL:
-                return self.stats.pres_waiting_for_resilver
-
-    property total_secs_left:
-        def __get__(self):
-            if self.state != ScanState.SCANNING:
+        def __init__(self, ZFS root, ZFSPool pool):
+            self.root = root
+            self.pool = pool
+            self.stats = NULL
+            cdef NVList config
+            cdef NVList nvroot = pool.get_raw_config().get_raw(zfs.ZPOOL_CONFIG_VDEV_TREE)
+            cdef int ret
+            cdef uint_t total
+            if zfs.ZPOOL_CONFIG_RAIDZ_EXPAND_STATS not in nvroot:
                 return
 
-            copied = self.bytes_reflowed
-            total = self.bytes_to_reflow or 1
-            fraction_done = <float>copied / <float>total
+            ret = nvroot.nvlist_lookup_uint64_array(
+                <nvpair.nvlist_t*>nvroot.handle, zfs.ZPOOL_CONFIG_RAIDZ_EXPAND_STATS, <uint64_t **>&self.stats, &total
+            )
+            if ret != 0:
+                raise ZFSPoolRaidzExpandStatsException(ret)
 
-            elapsed = time.time() - self.stats.pres_start_time
-            elapsed = elapsed or 1
-            rate = <float>copied / <float>elapsed
-            rate = rate or 1
-            return int((total - copied) / rate)
+        property state:
+            def __get__(self):
+                if self.stats != NULL:
+                    return ScanState(self.stats.pres_state)
 
-    property percentage:
-        def __get__(self):
-            if self.stats == NULL:
-                return
+        property expanding_vdev:
+            def __get__(self):
+                if self.stats != NULL:
+                    return self.stats.pres_expanding_vdev
 
-            copied = self.bytes_reflowed
-            total = self.bytes_to_reflow or 1
+        property start_time:
+            def __get__(self):
+                if self.stats != NULL:
+                    return datetime.fromtimestamp(self.stats.pres_start_time, tz=timezone.utc)
 
-            return (<float>copied / <float>total) * 100
+        property end_time:
+            def __get__(self):
+                if self.stats != NULL and self.state != ScanState.SCANNING:
+                    return datetime.fromtimestamp(self.stats.pres_end_time, tz=timezone.utc)
 
-    def asdict(self):
-        return {
-            'state': self.state.name if self.stats != NULL else None,
-            'expanding_vdev': self.expanding_vdev,
-            'start_time': self.start_time,
-            'end_time': self.end_time,
-            'bytes_to_reflow': self.bytes_to_reflow,
-            'bytes_reflowed': self.bytes_reflowed,
-            'waiting_for_resilver': self.waiting_for_resilver,
-            'total_secs_left': self.total_secs_left,
-            'percentage': self.percentage,
-        }
+        property bytes_to_reflow:
+            def __get__(self):
+                if self.stats != NULL:
+                    return self.stats.pres_to_reflow
+
+        property bytes_reflowed:
+            def __get__(self):
+                if self.stats != NULL:
+                    return self.stats.pres_reflowed
+
+        property waiting_for_resilver:
+            def __get__(self):
+                if self.stats != NULL:
+                    return self.stats.pres_waiting_for_resilver != 0
+
+        property total_secs_left:
+            def __get__(self):
+                if self.state != ScanState.SCANNING:
+                    return
+
+                copied = self.bytes_reflowed
+                total = self.bytes_to_reflow or 1
+                fraction_done = <float>copied / <float>total
+
+                elapsed = time.time() - self.stats.pres_start_time
+                elapsed = elapsed or 1
+                rate = <float>copied / <float>elapsed
+                rate = rate or 1
+                return max(int((total - copied) / rate), 0)
+
+        property percentage:
+            def __get__(self):
+                if self.stats == NULL:
+                    return
+
+                if self.state == ScanState.FINISHED:
+                    return 100.0
+
+                copied = self.bytes_reflowed
+                total = self.bytes_to_reflow or 1
+
+                return min((<float>copied / <float>total) * 100, 100.0)
+
+        def asdict(self):
+            return {
+                'state': self.state.name if self.stats != NULL else None,
+                'expanding_vdev': self.expanding_vdev,
+                'start_time': self.start_time,
+                'end_time': self.end_time,
+                'bytes_to_reflow': self.bytes_to_reflow,
+                'bytes_reflowed': self.bytes_reflowed,
+                'waiting_for_resilver': self.waiting_for_resilver,
+                'total_secs_left': self.total_secs_left,
+                'percentage': self.percentage,
+            }
 
 
 cdef class ZPoolScrub(object):
@@ -2721,12 +2760,12 @@ cdef class ZPoolScrub(object):
     property start_time:
         def __get__(self):
             if self.stats != NULL:
-                return datetime.utcfromtimestamp(self.stats.pss_start_time)
+                return datetime.fromtimestamp(self.stats.pss_start_time, tz=timezone.utc)
 
     property end_time:
         def __get__(self):
             if self.stats != NULL and self.state != ScanState.SCANNING:
-                return datetime.utcfromtimestamp(self.stats.pss_end_time)
+                return datetime.fromtimestamp(self.stats.pss_end_time, tz=timezone.utc)
 
     property bytes_to_scan:
         def __get__(self):
@@ -2743,12 +2782,15 @@ cdef class ZPoolScrub(object):
             if self.state != ScanState.SCANNING:
                 return
 
-            total = self.bytes_to_scan - self.stats.pss_skipped
+            IF HAVE_POOL_SCAN_STAT_PSS_SKIPPED:
+                total = self.bytes_to_scan - self.stats.pss_skipped
+            ELSE:
+                total = self.bytes_to_scan 
             issued = self.bytes_issued
             elapsed = ((int(time.time()) - self.stats.pss_pass_start) - self.stats.pss_pass_scrub_spent_paused) or 1
             pass_issued = self.stats.pss_pass_issued or 1
             issue_rate = pass_issued / elapsed
-            return int((total - issued) / issue_rate)
+            return max(int((total - issued) / issue_rate), 0)
 
     property bytes_issued:
         def __get__(self):
@@ -2760,15 +2802,31 @@ cdef class ZPoolScrub(object):
             if self.stats != NULL:
                 return self.stats.pss_pass_issued
 
-    property bytes_skipped:
+    property bytes_to_process:
         def __get__(self):
             if self.stats != NULL:
-                return self.stats.pss_skipped
+                IF HAVE_POOL_SCAN_STAT_PSS_SKIPPED:
+                    if self.bytes_to_scan > self.bytes_skipped:
+                        return self.bytes_to_scan - self.bytes_skipped
+                    return 0
+                ELSE:
+                    return self.bytes_to_scan
+
+    property bytes_processed:
+        def __get__(self):
+            if self.stats != NULL:
+                return min(self.bytes_issued, self.bytes_to_process)
+
+    IF HAVE_POOL_SCAN_STAT_PSS_SKIPPED:
+        property bytes_skipped:
+            def __get__(self):
+                if self.stats != NULL:
+                    return self.stats.pss_skipped
 
     property pause:
         def __get__(self):
             if self.state == ScanState.SCANNING and self.stats.pss_pass_scrub_pause != 0:
-                return datetime.utcfromtimestamp(self.stats.pss_pass_scrub_pause)
+                return datetime.fromtimestamp(self.stats.pss_pass_scrub_pause, tz=timezone.utc)
 
     property errors:
         def __get__(self):
@@ -2780,14 +2838,13 @@ cdef class ZPoolScrub(object):
             if self.stats == NULL:
                 return
 
-            if not self.bytes_to_scan:
+            if self.state == ScanState.FINISHED:
+                return 100.0
+
+            if not self.bytes_to_process:
                 return 0
 
-            bytes_total = self.bytes_to_scan - self.bytes_skipped
-            if bytes_total == 0:
-                return 0
-
-            return (<float>self.bytes_issued / <float>bytes_total) * 100
+            return min((<float>self.bytes_processed / <float>self.bytes_to_process) * 100, 100.0)
 
     def asdict(self):
         return {
@@ -2796,8 +2853,8 @@ cdef class ZPoolScrub(object):
             'start_time': self.start_time,
             'end_time': self.end_time,
             'percentage': self.percentage,
-            'bytes_to_process': self.bytes_scanned,
-            'bytes_processed': self.bytes_to_scan,
+            'bytes_to_process': self.bytes_to_process,
+            'bytes_processed': self.bytes_processed,
             'bytes_issued': self.bytes_issued,
             'pause': self.pause,
             'errors': self.errors,
@@ -3205,9 +3262,10 @@ cdef class ZFSPool(object):
         def __get__(self):
             return ZPoolScrub(self.root, self)
 
-    property expand:
-        def __get__(self):
-            return ZPoolRaidzExpand(self.root, self)
+    IF HAVE_POOL_RAIDZ_EXPAND_STAT_T == 1:
+        property expand:
+            def __get__(self):
+                return ZPoolRaidzExpand(self.root, self)
 
     IF HAVE_LZC_WAIT:
         def wait(self, operation_type):
@@ -3334,7 +3392,10 @@ cdef class ZFSPool(object):
         cdef boolean_t ashift = check_ashift
 
         with nogil:
-            ret = libzfs.zpool_add(self.handle, vd.nvlist.handle, ashift)
+            IF HAVE_ZPOOL_ADD == 3:
+                ret = libzfs.zpool_add(self.handle, vd.nvlist.handle, ashift)
+            ELSE:
+                ret = libzfs.zpool_add(self.handle, vd.nvlist.handle)
 
         if ret != 0:
             raise self.root.get_error()
@@ -3423,44 +3484,46 @@ cdef class ZFSPool(object):
             raise self.root.get_error()
 
         for i in self.features:
-            if i.state == FeatureState.DISABLED:
+            if i.supports_upgrade and i.state == FeatureState.DISABLED:
                 i.enable()
 
         self.root.write_history('zpool upgrade', self.name)
 
-    def ddt_prefetch(self):
-        cdef int ret
+    IF HAVE_ZPOOL_PREFETCH:
+        def ddt_prefetch(self):
+            cdef int ret
 
-        with nogil:
-            ret = libzfs.zpool_prefetch(self.handle, zfs.ZPOOL_PREFETCH_DDT)
+            with nogil:
+                ret = libzfs.zpool_prefetch(self.handle, zfs.ZPOOL_PREFETCH_DDT)
 
-        if ret != 0:
-            raise self.root.get_error()
+            if ret != 0:
+                raise self.root.get_error()
 
-        self.root.write_history('zpool prefetch -t ddt', self.name)
+            self.root.write_history('zpool prefetch -t ddt', self.name)
 
-    def ddt_prune(self, percentage=None, days=None):
-        cdef int ret
-        cdef zfs.zpool_ddt_prune_unit_t arg
-        cdef uint64_t value
+    IF HAVE_ZPOOL_DDT_PRUNE:
+        def ddt_prune(self, percentage=None, days=None):
+            cdef int ret
+            cdef zfs.zpool_ddt_prune_unit_t arg
+            cdef uint64_t value
 
-        if percentage is not None and days is not None:
-            raise ZFSException(py_errno.EINVAL, 'Only one of "days" or "percentage" should be defined, not both')
-        elif percentage is not None and (percentage > 100 or percentage < 1):
-            raise ZFSException(py_errno.EINVAL, 'Invalid percentage value it must be between 1 to 100')
-        elif days is not None and days < 1:
-            raise ZFSException(py_errno.EINVAL, 'Invalid number of days they must be greater than 1')
+            if percentage is not None and days is not None:
+                raise ZFSException(py_errno.EINVAL, 'Only one of "days" or "percentage" should be defined, not both')
+            elif percentage is not None and (percentage > 100 or percentage < 1):
+                raise ZFSException(py_errno.EINVAL, 'Invalid percentage value it must be between 1 to 100')
+            elif days is not None and days < 1:
+                raise ZFSException(py_errno.EINVAL, 'Invalid number of days they must be greater than 1')
 
-        arg = zfs.ZPOOL_DDT_PRUNE_PERCENTAGE if percentage else zfs.ZPOOL_DDT_PRUNE_AGE
-        value = percentage or days
+            arg = zfs.ZPOOL_DDT_PRUNE_PERCENTAGE if percentage else zfs.ZPOOL_DDT_PRUNE_AGE
+            value = percentage or days
 
-        with nogil:
-            ret = libzfs.zpool_ddt_prune(self.handle, arg, value)
+            with nogil:
+                ret = libzfs.zpool_ddt_prune(self.handle, arg, value)
 
-        if ret != 0:
-            raise self.root.get_error()
+            if ret != 0:
+                raise self.root.get_error()
 
-        self.root.write_history('zpool ddt-prune', {'-p' if percentage else '-d'}, {percentage or days}, self.name)
+            self.root.write_history('zpool ddt-prune', {'-p' if percentage else '-d'}, {percentage or days}, self.name)
 
 
 cdef class ZFSImportablePool(ZFSPool):
@@ -3849,11 +3912,18 @@ cdef class ZFSResource(ZFSObject):
             #   which can fail for a myriad of reasons)
             raise self.root.get_error()
 
-    @staticmethod
-    cdef int _userspace_cb(void *data, const char *domain, uint32_t rid, uint64_t space, uint64_t default_quota) noexcept nogil:
-        with gil:
-            result = <list>data
-            result.append({'domain': domain, 'rid': rid, 'space': space, 'default_quota': default_quota})
+    IF HAVE_ZFS_USERSPACE_CB_T == 5:
+        @staticmethod
+        cdef int _userspace_cb(void *data, const char *domain, uint32_t rid, uint64_t space, uint64_t default_quota) noexcept nogil:
+            with gil:
+                result = <list>data
+                result.append({'domain': domain, 'rid': rid, 'space': space, 'default_quota': default_quota})
+    ELSE:
+        @staticmethod
+        cdef int _userspace_cb(void *data, const char *domain, uint32_t rid, uint64_t space) noexcept nogil:
+            with gil:
+                result = <list>data
+                result.append({'domain': domain, 'rid': rid, 'space': space})
 
     def userspace(self, quota_props):
         results = {}
@@ -4295,7 +4365,7 @@ cdef class ZFSDataset(ZFSResource):
         cdef int defer_deletion = defer
 
         with nogil:
-            ret = libzfs.zfs_destroy_snaps(self.handle, c_name, defer_deletion)
+            ret = libzfs.zfs_destroy_snaps(self.handle, <char *>c_name, defer_deletion)
 
         if ret != 0:
             raise self.root.get_error()
@@ -4350,7 +4420,7 @@ cdef class ZFSDataset(ZFSResource):
         cdef int ret
 
         if force:
-            flags = zfs.MS_FORCE
+            flags = zfs.MNT_FORCE
 
         with nogil:
             ret = libzfs.zfs_unmountall(self.handle, flags)
